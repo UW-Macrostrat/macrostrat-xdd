@@ -75,7 +75,7 @@ with the database.
 
 ## Frontend React component
 
-The frontend React component can be found in this repo: [UW-Macrostrat/web-components](https://github.com/UW-Macrostrat/web-components/tree/main/packages/feedback-components). A current version of this feedback component can be found at [http://cosmos0003.chtc.wisc.edu:3000/?path=/docs/feedback-components-feedbackcomponent--docs](http://cosmos0003.chtc.wisc.edu:3000/?path=/docs/feedback-components-feedbackcomponent--docs) 
+The frontend React component can be found in this repo: [UW-Macrostrat/web-components](https://github.com/UW-Macrostrat/web-components/tree/main/packages/feedback-components). A current version of this feedback component can be found at [https://dev2.macrostrat.org/docs/web-components/?path=/docs/text-extractions-text-extraction--docs](https://dev2.macrostrat.org/docs/web-components/?path=/docs/text-extractions-text-extraction--docs) 
 
 ## Feedback puller
 
