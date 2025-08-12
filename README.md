@@ -64,7 +64,7 @@ $ export PYTHONPATH="${PYTHONPATH}:/working_dir"
 
 Then you can launch the server using:
 ```
-$ python3 -u server.py &> server_requests.log &
+$ python3 -u -m macrostrat_db_insertion.server &> server_requests.log &
 ```
 
 which will launch the server on port `9543` as a background process. Note that to properly launch the server, the environment variables `uri`, and `schema` must be set to the proper values so that the server can properly communicate
