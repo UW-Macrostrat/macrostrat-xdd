@@ -56,10 +56,7 @@ The API endpoint is a Flask server that uses SQLAlchemy to verify the input data
 The code for the server can be found in the `macrostrat_db_insertion` directory. We have provided a docker container that contains all of the necessary dependencies which you can setup using:
 ```
 $ cd macrostrat_db_insertion
-$ export CURRENT_DIR=`pwd`
-$ docker build -t db_insert:latest .
-$ docker run -d -v $CURRENT_DIR:/working_dir/ --name=db_insert --entrypoint /bin/bash -p 9543:9543 db_insert:latest -c "sleep infinity"
-$ docker exec -it db_insert bash
+$ make build
 $ conda activate db_insert_env
 $ pkill -9 -f "server"
 $ export PYTHONPATH="${PYTHONPATH}:/working_dir"
