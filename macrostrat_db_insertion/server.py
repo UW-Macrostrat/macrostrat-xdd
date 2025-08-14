@@ -928,10 +928,9 @@ def process_user_feedback_input_request(request_data, session):
 async def record_run(
         request: Request,
         user_has_access: bool = Depends(has_access),
-        user_id: str | None = Depends(get_user_id),
+        user_id: str = "43",
         session: Session = Depends(get_session)
 ):
-
     if not user_has_access:
         raise HTTPException(status_code=403, detail="User does not have access to record run")
 
@@ -952,8 +951,12 @@ async def record_run(
         print("Returning error message", error_msg)
         raise HTTPException(status_code=400, detail=error_msg)
 
-    return JSONResponse(content={"success": "Successfully processed the run"})
+    success, internal_id = get_internal_user_id(user_id, session)
 
+    return JSONResponse(content={
+        "success": "Successfully processed the run",
+        "internal_id": str(internal_id) 
+    })
 
 @app.get("/health")
 async def health(
