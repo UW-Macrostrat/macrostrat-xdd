@@ -921,7 +921,7 @@ def process_user_feedback_input_request(request_data, session):
             if not success:
                 return success, err_msg
 
-    return True, None
+    return True, request_additional_data["internal_run_id"]
 
 # Opentially take in user id
 @app.post("/record_run")
@@ -951,11 +951,14 @@ async def record_run(
         print("Returning error message", error_msg)
         raise HTTPException(status_code=400, detail=error_msg)
 
+    table_id = error_msg
+
     success, internal_id = get_internal_user_id(user_id, session)
 
     return JSONResponse(content={
         "success": "Successfully processed the run",
-        "internal_id": str(internal_id) 
+        "internal_id": str(internal_id),
+        "table_id": str(table_id)
     })
 
 @app.get("/health")
