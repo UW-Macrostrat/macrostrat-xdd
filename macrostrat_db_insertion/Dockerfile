@@ -20,6 +20,10 @@ RUN source ~/.bashrc
 
 WORKDIR /app
 
+# Accept conda terms of service
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
 # Create and activate conda environment
 COPY environment.yml environment.yml
 RUN conda env create -f environment.yml

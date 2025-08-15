@@ -15,3 +15,4 @@ jobs:
     with:
       image: 'hub.opensciencegrid.org/macrostrat/macrostrat-xdd'
       context: macrostrat_db_insertion
+      file: macrostrat_db_insertion/Dockerfile
