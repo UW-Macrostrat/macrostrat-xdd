@@ -928,7 +928,7 @@ def process_user_feedback_input_request(request_data, session):
 async def record_run(
         request: Request,
         user_has_access: bool = Depends(has_access),
-        user_id: str = Depends(get_user_id),
+        user_id: str | None = Depends(get_user_id),
         session: Session = Depends(get_session)
 ):
     if not user_has_access:
