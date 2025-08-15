@@ -921,7 +921,7 @@ def process_user_feedback_input_request(request_data, session):
             if not success:
                 return success, err_msg
 
-    return True, None
+    return True, request_additional_data["internal_run_id"]
 
 # Opentially take in user id
 @app.post("/record_run")
@@ -931,7 +931,6 @@ async def record_run(
         user_id: str | None = Depends(get_user_id),
         session: Session = Depends(get_session)
 ):
-
     if not user_has_access:
         raise HTTPException(status_code=403, detail="User does not have access to record run")
 
@@ -952,8 +951,14 @@ async def record_run(
         print("Returning error message", error_msg)
         raise HTTPException(status_code=400, detail=error_msg)
 
-    return JSONResponse(content={"success": "Successfully processed the run"})
+    table_id = error_msg
 
+    return JSONResponse(content={
+        "success": "Successfully processed the run",
+        "data": {
+            "table_id": str(table_id)
+        }
+    })
 
 @app.get("/health")
 async def health(
