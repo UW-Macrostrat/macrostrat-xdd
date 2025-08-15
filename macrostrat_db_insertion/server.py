@@ -928,7 +928,7 @@ def process_user_feedback_input_request(request_data, session):
 async def record_run(
         request: Request,
         user_has_access: bool = Depends(has_access),
-        user_id: str = "43",
+        user_id: str = Depends(get_user_id),
         session: Session = Depends(get_session)
 ):
     if not user_has_access:
@@ -953,12 +953,11 @@ async def record_run(
 
     table_id = error_msg
 
-    success, internal_id = get_internal_user_id(user_id, session)
-
     return JSONResponse(content={
         "success": "Successfully processed the run",
-        "internal_id": str(internal_id),
-        "table_id": str(table_id)
+        "data": {
+            "table_id": str(table_id)
+        }
     })
 
 @app.get("/health")
