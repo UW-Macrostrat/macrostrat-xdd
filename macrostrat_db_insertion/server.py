@@ -689,17 +689,9 @@ def process_model_input_request(request_data, session):
 
     # Get the model metadata for this model
     request_additional_data = {}
-
-    # use IDs if provided
-    if "model_id" in request_data and "version_id" in request_data:
-        request_additional_data["internal_model_id"] = request_data["model_id"]
-        request_additional_data["internal_version_id"] = request_data["version_id"]
-
-    # fallback to old behavior
-    else:
-        sucess, err_msg = get_model_metadata(request_data, request_additional_data, session)
-        if not sucess:
-            return sucess, err_msg
+    sucess, err_msg = get_model_metadata(request_data, request_additional_data, session)
+    if not sucess:
+        return sucess, err_msg
 
     # Record each result as an independent run
     extraction_pipeline_id = request_data["extraction_pipeline_id"]
@@ -896,15 +888,9 @@ def process_user_feedback_input_request(request_data, session):
     user_run_table = get_base().metadata.tables[user_run_table_name]
     try:
         user_run_insert_values = {
-            "user_id": user_id,
-            "source_text_id": source_text_id
+            "user_id" : user_id,
+            "source_text_id" : source_text_id
         }
-
-        if "model_id" in request_data:
-            user_run_insert_values["model_id"] = request_data["model_id"]
-
-        if "version_id" in request_data:
-            user_run_insert_values["version_id"] = request_data["version_id"]
         if previous_run_id is not None:
             user_run_insert_values["supersedes"] = previous_run_id
 
