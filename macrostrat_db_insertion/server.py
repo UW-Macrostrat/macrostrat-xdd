@@ -413,7 +413,7 @@ def get_entity_type_id(entity_type, session: Session):
     except:
         return False, "Failed to insert entity type " + entity_type + " into table " + entity_type_table_name + " due to error: " + traceback.format_exc()
 
-def get_entity_id(entity_name, entity_type, request_additional_data, session: Session, provided_start_idx = None, provided_end_idx = None):
+def get_entity_id(entity_name, entity_type, request_additional_data, session: Session, provided_start_idx = None, provided_end_idx = None, global_entity_id=None):
     # Get the entity
     entity_type_id = None
     if "curr_entity_type_id" in request_additional_data:
@@ -434,6 +434,11 @@ def get_entity_id(entity_name, entity_type, request_additional_data, session: Se
         entity_insert_request_values["entity_type_id"] = entity_type_id
 
     entity_start_idx, entity_end_idx, str_match_type = provided_start_idx, provided_end_idx, "provided"
+    
+    # Add global entity ID if provided by the client
+    if global_entity_id is not None:
+        entity_insert_request_values["global_entity_id"] = global_entity_id
+
     if entity_start_idx is None or entity_end_idx is None:
         # See if we can get a direct match
         lower_para_text = request_additional_data["paragraph_txt"].lower()
@@ -551,7 +556,7 @@ def record_single_entity(entity, request_additional_data, session: Session):
         return success, indicies_results
     provided_start_idx, provided_end_idx = indicies_results
 
-    return get_entity_id(entity["entity"], entity_type, request_additional_data, session, provided_start_idx, provided_end_idx)
+    return get_entity_id(entity["entity"], entity_type, request_additional_data, session, provided_start_idx, provided_end_idx, global_entity_id=entity.get("global_entity_id"))
 
 def get_relationship_type_id(relationship_type, session: Session):
     relationship_type_table_name = get_complete_table_name("relationship_type")
@@ -842,9 +847,14 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
     success, entity_type_name = get_entity_type_text(curr_entity_type_id, session)
     if not success:
         return success, entity_type_name
+    
+    global_entity_id = (
+        node_info.get("global_entity_id")
+        or (node_info.get("match") or {}).get("global_entity_id")
+    )
 
     request_additional_data["curr_entity_type_id"] = curr_entity_type_id
-    success, new_node_id = get_entity_id(entity_name, None, request_additional_data, session, start_idx, end_idx)
+    success, new_node_id = get_entity_id(entity_name, None, request_additional_data, session, start_idx, end_idx, global_entity_id=global_entity_id)
     if not success:
         return success, new_node_id
 
