@@ -28,8 +28,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def setup_engine(a: FastAPI):
     """Return database client instance."""
+    logger.info("Connecting to database...")
     connect_engine(settings.uri, settings.SCHEMA)
+    logger.info("Database connected")
     yield
+    logger.info("Disposing engine")
     dispose_engine()
 
 app = FastAPI(
@@ -413,7 +416,7 @@ def get_entity_type_id(entity_type, session: Session):
     except:
         return False, "Failed to insert entity type " + entity_type + " into table " + entity_type_table_name + " due to error: " + traceback.format_exc()
 
-def get_entity_id(entity_name, entity_type, request_additional_data, session: Session, provided_start_idx = None, provided_end_idx = None, global_entity_id=None):
+def get_entity_id(entity_name, entity_type, request_additional_data, session: Session, provided_start_idx = None, provided_end_idx = None, macrostrat_terms_id=None):
     # Get the entity
     entity_type_id = None
     if "curr_entity_type_id" in request_additional_data:
@@ -436,8 +439,8 @@ def get_entity_id(entity_name, entity_type, request_additional_data, session: Se
     entity_start_idx, entity_end_idx, str_match_type = provided_start_idx, provided_end_idx, "provided"
     
     # Add global entity ID if provided by the client
-    if global_entity_id is not None:
-        entity_insert_request_values["global_entity_id"] = global_entity_id
+    if macrostrat_terms_id is not None:
+        entity_insert_request_values["macrostrat_terms_id"] = macrostrat_terms_id
 
     if entity_start_idx is None or entity_end_idx is None:
         # See if we can get a direct match
@@ -556,7 +559,7 @@ def record_single_entity(entity, request_additional_data, session: Session):
         return success, indicies_results
     provided_start_idx, provided_end_idx = indicies_results
 
-    return get_entity_id(entity["entity"], entity_type, request_additional_data, session, provided_start_idx, provided_end_idx, global_entity_id=entity.get("global_entity_id"))
+    return get_entity_id(entity["entity"], entity_type, request_additional_data, session, provided_start_idx, provided_end_idx, macrostrat_terms_id=entity.get("macrostrat_terms_id"))
 
 def get_relationship_type_id(relationship_type, session: Session):
     relationship_type_table_name = get_complete_table_name("relationship_type")
@@ -848,13 +851,13 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
     if not success:
         return success, entity_type_name
     
-    global_entity_id = (
-        node_info.get("global_entity_id")
-        or (node_info.get("match") or {}).get("global_entity_id")
+    macrostrat_terms_id = (
+        node_info.get("macrostrat_terms_id")
+        or (node_info.get("match") or {}).get("macrostrat_terms_id")
     )
 
     request_additional_data["curr_entity_type_id"] = curr_entity_type_id
-    success, new_node_id = get_entity_id(entity_name, None, request_additional_data, session, start_idx, end_idx, global_entity_id=global_entity_id)
+    success, new_node_id = get_entity_id(entity_name, None, request_additional_data, session, start_idx, end_idx, macrostrat_terms_id=macrostrat_terms_id)
     if not success:
         return success, new_node_id
 
