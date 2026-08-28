@@ -809,23 +809,44 @@ def get_internal_user_id(external_user_id : str, session : Session):
     except:
         return False, "Failed to insert user " + str(external_user_id) + " into table " + str(users_table_name) + " due to error: " + traceback.format_exc()
 
-def get_entity_type_text(entity_type_id, session : Session):
+def get_entity_type_text(
+    entity_type_id: int,
+    session: Session,
+    type_name: str | None = None,
+    user_id: str | None = None,
+):
     entity_type_table_name = get_complete_table_name("entity_type")
     entity_type_table = get_base().metadata.tables[entity_type_table_name]
 
-    # First try to get the entity type
     try:
-        entity_type_id_select_statement = SELECT_STATEMENT(entity_type_table)
-        entity_type_id_select_statement = entity_type_id_select_statement.where(entity_type_table.c.id == entity_type_id)
-        entity_type_result = session.execute(entity_type_id_select_statement).all()
+        stmt = SELECT_STATEMENT(entity_type_table).where(
+            entity_type_table.c.id == entity_type_id
+        )
+        result = session.execute(stmt).first()
 
-        # Return if this type is valid or not
-        if len(entity_type_result) == 0:
-            return False, "Failed to get text for entity type id of " + str(entity_type_id)
-        
-        return True, entity_type_result[0]._mapping["name"]
-    except:
-        err_msg = "Failed to find type id " + str(entity_type_id) + " in table " + str(entity_type_table_name) + " due to error: " + traceback.format_exc()
+        if result is not None:
+            return True, result._mapping["name"]
+
+        if type_name is None:
+            return False, f"Entity type id {entity_type_id} does not exist and no type_name was provided."
+
+        insert_stmt = entity_type_table.insert().values(
+            id=entity_type_id,
+            name=type_name,
+            source=str(user_id) if user_id is not None else "user",
+        )
+        session.execute(insert_stmt)
+        session.commit()
+
+        return True, type_name
+
+    except Exception:
+        session.rollback()
+        err_msg = (
+            f"Failed to find/create type id {entity_type_id} "
+            f"in table {entity_type_table_name} due to error:\n"
+            f"{traceback.format_exc()}"
+        )
         return False, err_msg
 
 def record_user_node_info(node_info, request_additional_data, session : Session):
@@ -846,8 +867,9 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
     
     # Record if the user provided the id for an entity type
     curr_entity_type_id = node_info["type"]
+    curr_entity_type_name = node_info.get("type_name")
     request_additional_data.pop("curr_entity_type_id", None)
-    success, entity_type_name = get_entity_type_text(curr_entity_type_id, session)
+    success, entity_type_name = get_entity_type_text(curr_entity_type_id, session, type_name=curr_entity_type_name, user_id="user_id") # TODO: Replace "user_id" with actual user id if available
     if not success:
         return success, entity_type_name
     
