@@ -627,10 +627,74 @@ def insert_relationship(src_entity_id, dst_entity_id, relationship_type, request
 
     return True, None
 
-RELATIONSHIP_DETAILS = {
-    "strat" : ("strat_to_lith", "strat_name", "lith"),
-    "att" : ("lith_to_attribute", "lith", "lith_att")
-}
+def get_relationship_details(
+    relationship_type: str,
+    session: Session,
+):
+    relationship_table_name = get_complete_table_name(
+        "relationship_type"
+    )
+    entity_table_name = get_complete_table_name("entity_type")
+
+    relationship_table = get_base().metadata.tables[
+        relationship_table_name
+    ]
+    entity_table = get_base().metadata.tables[
+        entity_table_name
+    ]
+
+    src_type = entity_table.alias("src_type")
+    dst_type = entity_table.alias("dst_type")
+
+    try:
+        statement = (
+            SELECT_STATEMENT(
+                relationship_table.c.id.label(
+                    "relationship_type_id"
+                ),
+                relationship_table.c.name.label(
+                    "relationship_type"
+                ),
+                src_type.c.id.label("src_entity_type_id"),
+                src_type.c.name.label("src_entity_type"),
+                dst_type.c.id.label("dst_entity_type_id"),
+                dst_type.c.name.label("dst_entity_type"),
+            )
+            .select_from(
+                relationship_table.join(
+                    src_type,
+                    relationship_table.c.src_entity_type_id
+                    == src_type.c.id,
+                ).join(
+                    dst_type,
+                    relationship_table.c.dst_entity_type_id
+                    == dst_type.c.id,
+                )
+            )
+            .where(
+                relationship_table.c.name == relationship_type
+            )
+        )
+
+        result = session.execute(
+            statement
+        ).mappings().first()
+
+    except Exception:
+        return False, (
+            f"Failed to load relationship type "
+            f"{relationship_type}:\n"
+            f"{traceback.format_exc()}"
+        )
+
+    if result is None:
+        return False, (
+            f"Relationship type '{relationship_type}' does not exist "
+            "or its source/destination types are not configured."
+        )
+
+    return True, dict(result)
+
 def record_relationship(relationship, request_additional_data, session: Session):
     # Ensure that we have the required metadata fields
     relationship_required_fields = verify_key_presents(relationship, ["src", "relationship_type", "dst"])
@@ -638,12 +702,19 @@ def record_relationship(relationship, request_additional_data, session: Session)
         return False, relationship_required_fields
 
     # Extract the types
-    provided_relationship_type = relationship["relationship_type"]
-    db_relationship_type, src_entity_type, dst_entity_type = provided_relationship_type, None, None
-    for key_name in RELATIONSHIP_DETAILS:
-        if provided_relationship_type.startswith(key_name):
-            db_relationship_type, src_entity_type, dst_entity_type = RELATIONSHIP_DETAILS[key_name]
-            break
+    provided_type = relationship["relationship_type"]
+
+    success, details = get_relationship_details(
+        provided_type,
+        session,
+    )
+
+    if not success:
+        return False, details
+
+    db_relationship_type = details["relationship_type"]
+    src_entity_type = details["src_entity_type"]
+    dst_entity_type = details["dst_entity_type"]
 
     # Extract the source indicies
     success, indicies_results = extract_indicies(relationship, "src_")
