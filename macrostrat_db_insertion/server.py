@@ -327,57 +327,6 @@ def get_source_text_id(source_text, request_additional_data, session: Session):
 
     return METHOD_TO_PROCESS_TEXT[text_type](source_text, request_additional_data, session)
 
-def get_lith_id(lithology):
-    try:
-        result = requests.get("https://macrostrat.org/api/v2/defs/lithologies", params = {"lith" : lithology.lower()})
-        result_data = result.json()
-
-        # Ensure the request has a result
-        if "success" not in result_data or "data" not in result_data["success"] or len(result_data["success"]["data"]) == 0:
-            return True, None
-
-        # Extract that result
-        first_result = result_data["success"]["data"][0]
-        return True, first_result["lith_id"]
-    except:
-        return False, "Failed to get id for lith " + lithology + " due to error: " + traceback.format_exc()
-
-def get_lith_att_id(lith_attribute):
-    try:
-        result = requests.get("https://macrostrat.org/api/v2/defs/lithology_attributes", params = {"lith_att" : lith_attribute.lower()})
-        result_data = result.json()
-
-        # Ensure the request has a result
-        if "success" not in result_data or "data" not in result_data["success"] or len(result_data["success"]["data"]) == 0:
-            return True, None
-
-        # Extract that result
-        first_result = result_data["success"]["data"][0]
-        return True, first_result["lith_att_id"]
-    except:
-        return False, "Failed to get id for lith attribute " + lith_attribute + " due to error: " + traceback.format_exc()
-
-def get_strat_id(strat_name):
-    try:
-        result = requests.get("https://macrostrat.org/api/v2/defs/strat_names", params = {"strat_name_like" : strat_name.lower()})
-        result_data = result.json()
-
-        # Ensure the request has a result
-        if "success" not in result_data or "data" not in result_data["success"] or len(result_data["success"]["data"]) == 0:
-            return True, None
-
-        # Extract that result
-        first_result = result_data["success"]["data"][0]
-        return True, first_result["strat_name_id"]
-    except:
-        return False, "Failed to get id for strat name " + strat_name + " due to error: " + traceback.format_exc()
-
-ENTITY_TYPE_MAPPING = {
-    "lith" : ("lith_id", get_lith_id),
-    "lith_att" : ("lith_att_id", get_lith_att_id),
-    "strat_name" : ("strat_name_id", get_strat_id)
-}
-
 def get_entity_type_id(entity_type, session: Session):
     if entity_type is None:
         return True, None
@@ -473,19 +422,6 @@ def get_entity_id(entity_name, entity_type, request_additional_data, session: Se
     entity_insert_request_values["start_index"] = entity_start_idx
     entity_insert_request_values["end_index"] = entity_end_idx
     entity_insert_request_values["str_match_type"] = str_match_type
-
-    # See if we can link to a macrostrat id
-    if entity_type in ENTITY_TYPE_MAPPING:
-        key_name, id_getter = ENTITY_TYPE_MAPPING[entity_type]
-        sucess, id_val = id_getter(entity_name)
-
-        # First ensure the request sucessed
-        if not sucess:
-            return success, id_val
-
-        # Else ensure we can record the value
-        if id_val is not None:
-            entity_insert_request_values[key_name] = id_val
 
     # Insert in the result into the table
     entity_table_name = get_complete_table_name("entity")
@@ -829,19 +765,19 @@ def process_model_input_request(request_data, session):
         except:
             return False, "Failed to insert run with extraction id " + str(base_model_run_id) + " and idx " + str(idx) + " due to error: " + traceback.format_exc()
 
-        # Now actually record the graph
-        if "relationships" in current_result:
-            for relationship in current_result["relationships"]:
-                sucessful, message = record_relationship(relationship, request_additional_data, session)
-                if not sucessful:
-                    return sucessful, message
-
         # Record just the entities
         if "just_entities" in current_result:
             for entity in current_result["just_entities"]:
                 sucessful, err_msg = record_single_entity(entity, request_additional_data, session)
                 if not sucessful:
                     return sucessful, err_msg
+
+        # Now actually record the graph
+        if "relationships" in current_result:
+            for relationship in current_result["relationships"]:
+                sucessful, message = record_relationship(relationship, request_additional_data, session)
+                if not sucessful:
+                    return sucessful, message
 
     return True, None
 
