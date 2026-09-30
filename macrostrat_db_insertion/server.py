@@ -1089,7 +1089,22 @@ def lock_owned_feedback(session, run_id, external_user_id):
         )
     ).scalar_one_or_none()
     if owner is None or str(owner) != external_user_id:
-        raise HTTPException(403, "Only the owner can change this feedback run")
+        is_admin = session.execute(
+            text("""
+                SELECT is_admin
+                FROM macrostrat_auth."user"
+                WHERE sub = :user_id
+                FOR SHARE
+            """),
+            {"user_id": external_user_id},
+        ).scalar_one_or_none() is True
+
+        if not is_admin:
+            raise HTTPException(
+                403,
+                "Only the owner or an admin can change this feedback run",
+            )
+        
     if session.execute(
         SELECT_STATEMENT(runs.c.id).where(runs.c.supersedes == run_id).limit(1)
     ).first() is not None:
@@ -1110,6 +1125,53 @@ def clear_feedback_graph(session, run_id):
     session.execute(delete(relationships).where(relationships.c.run_id == run_id))
     session.execute(delete(entities).where(entities.c.run_id == run_id))
 
+# Return run_ids user has access to, or all run_ids if user is admin.
+@app.get("/feedback_runs/access")
+def get_feedback_access(
+    user_id: str = Depends(require_feedback_user),
+    session: Session = Depends(get_session),
+):
+    is_admin = session.execute(
+        text("""
+            SELECT COALESCE(role = 'admin', false) AS is_admin
+            FROM macrostrat_auth."user"
+            WHERE sub = :user_id
+        """),
+        {"user_id": user_id},
+    ).scalar_one_or_none() is True
+
+    if is_admin:
+        return {
+            "user_id": user_id,
+            "is_admin": True,
+            "scope": "all_feedback",
+            "run_ids": None,
+        }
+
+    runs = feedback_table("all_runs")
+    users = feedback_table("users")
+
+    run_ids = session.execute(
+        SELECT_STATEMENT(runs.c.id)
+        .select_from(
+            runs.join(
+                users,
+                users.c.internal_user_id == runs.c.user_id,
+            )
+        )
+        .where(
+            users.c.external_user_id == user_id,
+            runs.c.model_job_id.is_(None),
+        )
+        .order_by(runs.c.id)
+    ).scalars().all()
+
+    return {
+        "user_id": user_id,
+        "is_admin": False,
+        "scope": "owned_feedback",
+        "run_ids": list(run_ids),
+    }
 
 @app.delete("/feedback_runs/{run_id}")
 def delete_feedback_run(
