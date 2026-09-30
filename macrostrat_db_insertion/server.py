@@ -7,6 +7,9 @@ from pydantic_settings import BaseSettings
 from sqlalchemy.dialects.postgresql import insert as INSERT_STATEMENT
 from sqlalchemy import select as SELECT_STATEMENT, text
 from sqlalchemy.orm import Session
+from sqlalchemy import delete, or_
+from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 from fuzzysearch import find_near_matches
 import traceback
 import hashlib
@@ -47,7 +50,7 @@ app.add_middleware(
         "http://localhost:3000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -983,23 +986,28 @@ def process_user_feedback_input_request(request_data, session):
 
     return True, request_additional_data["internal_run_id"]
 
-# Opentially take in user id
+def require_feedback_user(
+    user_has_access: bool = Depends(has_access),
+    user_id: str | None = Depends(get_user_id),
+):
+    # Identity must come from the verified security dependency, never JSON.
+    if user_id is None or not str(user_id).strip():
+        raise HTTPException(401, "Authentication required")
+    if not user_has_access:
+        raise HTTPException(403, "User does not have access")
+    return str(user_id)
+
+
+# Authentication is required for both model and feedback writes.
 @app.post("/record_run")
 async def record_run(
         request: Request,
-#        user_has_access: bool = Depends(has_access),
-#        user_id: str | None = Depends(get_user_id),
+        user_id: str = Depends(require_feedback_user),
         session: Session = Depends(get_session)
 ):
-#    if not user_has_access:
-#        raise HTTPException(status_code=403, detail="User does not have access to record run")
-
-    user_id = "TEST"
 
     # Get the request data
     request_data = await request.json()
-    if user_id is None:
-        user_id = "test_user"
     request_data["user_id"] = str(user_id)
 
     # Record the run
@@ -1021,6 +1029,167 @@ async def record_run(
             "table_id": str(table_id)
         }
     })
+
+
+
+class FeedbackNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: StrictInt | StrictStr
+    type: StrictInt
+    name: str = Field(min_length=1)
+    txt_range: list[tuple[StrictInt, StrictInt]] = Field(min_length=1, max_length=1)
+    macrostrat_terms_id: StrictInt | None = None
+
+
+class FeedbackEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: StrictInt | StrictStr | None = None
+    source: StrictInt | StrictStr
+    dest: StrictInt | StrictStr
+    relationship_type_id: StrictInt
+
+
+class FeedbackReplacement(BaseModel):
+    # Full replacement, not a partial update. Ownership and run metadata are immutable.
+    model_config = ConfigDict(extra="forbid")
+    nodes: list[FeedbackNode]
+    edges: list[FeedbackEdge]
+
+    @model_validator(mode="after")
+    def validate_graph(self):
+        ids = [str(node.id) for node in self.nodes]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Node IDs must be unique")
+        ids = set(ids)
+        for edge in self.edges:
+            if str(edge.source) not in ids or str(edge.dest) not in ids:
+                raise ValueError("Every edge must reference nodes in this replacement")
+        edges = [(str(e.source), str(e.dest), e.relationship_type_id) for e in self.edges]
+        if len(edges) != len(set(edges)):
+            raise ValueError("Duplicate relationships")
+        return self
+
+
+def feedback_table(name):
+    return get_base().metadata.tables[get_complete_table_name(name)]
+
+
+def lock_owned_feedback(session, run_id, external_user_id):
+    runs, users = feedback_table("all_runs"), feedback_table("users")
+    run = session.execute(
+        SELECT_STATEMENT(runs).where(runs.c.id == run_id).with_for_update()
+    ).mappings().first()
+    if run is None:
+        raise HTTPException(404, "Feedback run not found")
+    if run["user_id"] is None or run.get("model_job_id") is not None:
+        raise HTTPException(403, "Only user feedback runs can be changed")
+    owner = session.execute(
+        SELECT_STATEMENT(users.c.external_user_id).where(
+            users.c.internal_user_id == run["user_id"]
+        )
+    ).scalar_one_or_none()
+    if owner is None or str(owner) != external_user_id:
+        raise HTTPException(403, "Only the owner can change this feedback run")
+    if session.execute(
+        SELECT_STATEMENT(runs.c.id).where(runs.c.supersedes == run_id).limit(1)
+    ).first() is not None:
+        raise HTTPException(409, "A later run references this run; create new feedback instead")
+    return run
+
+
+def clear_feedback_graph(session, run_id):
+    entities, relationships = feedback_table("entity"), feedback_table("relationship")
+    entity_ids = SELECT_STATEMENT(entities.c.id).where(entities.c.run_id == run_id)
+    # Do not delete another run's relationships if inconsistent cross-run links exist.
+    if session.execute(SELECT_STATEMENT(relationships.c.run_id).where(
+        relationships.c.run_id != run_id,
+        or_(relationships.c.src_entity_id.in_(entity_ids),
+            relationships.c.dst_entity_id.in_(entity_ids)),
+    ).limit(1)).first() is not None:
+        raise HTTPException(409, "Another run references entities in this run")
+    session.execute(delete(relationships).where(relationships.c.run_id == run_id))
+    session.execute(delete(entities).where(entities.c.run_id == run_id))
+
+
+@app.delete("/feedback_runs/{run_id}")
+def delete_feedback_run(
+    run_id: int,
+    user_id: str = Depends(require_feedback_user),
+    session: Session = Depends(get_session),
+):
+    try:
+        lock_owned_feedback(session, run_id, user_id)
+        clear_feedback_graph(session, run_id)
+        runs = feedback_table("all_runs")
+        session.execute(delete(runs).where(runs.c.id == run_id))
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(409, "Run is still referenced by other database records") from None
+    except Exception:
+        session.rollback()
+        raise
+    return {"success": True, "data": {"table_id": str(run_id)}}
+
+
+@app.put("/feedback_runs/{run_id}")
+def overwrite_feedback_run(
+    run_id: int,
+    payload: FeedbackReplacement,
+    user_id: str = Depends(require_feedback_user),
+    session: Session = Depends(get_session),
+):
+    try:
+        run = lock_owned_feedback(session, run_id, user_id)
+        sources = feedback_table("source_text")
+        paragraph = session.execute(SELECT_STATEMENT(sources.c.paragraph_text).where(
+            sources.c.id == run["source_text_id"]
+        )).scalar_one()
+        entity_types = feedback_table("entity_type")
+        relationship_types = feedback_table("relationship_type")
+        valid_types = set(session.execute(SELECT_STATEMENT(entity_types.c.id).where(
+            entity_types.c.id.in_({n.type for n in payload.nodes})
+        )).scalars())
+        valid_relationships = set(session.execute(SELECT_STATEMENT(relationship_types.c.id).where(
+            relationship_types.c.id.in_({e.relationship_type_id for e in payload.edges})
+        )).scalars())
+        for node in payload.nodes:
+            start, end = node.txt_range[0]
+            if node.type not in valid_types:
+                raise HTTPException(422, f"Unknown entity type: {node.type}")
+            if not (0 <= start < end <= len(paragraph)) or paragraph[start:end] != node.name:
+                raise HTTPException(422, f"Node {node.id}: range must exactly match its name")
+        for edge in payload.edges:
+            if edge.relationship_type_id not in valid_relationships:
+                raise HTTPException(422, f"Unknown relationship type: {edge.relationship_type_id}")
+
+        # Use Core inserts directly: the legacy helpers commit after each insert.
+        # One transaction covers deletion and all replacement inserts.
+        clear_feedback_graph(session, run_id)
+        entities, relationships = feedback_table("entity"), feedback_table("relationship")
+        node_ids = {}
+        for node in payload.nodes:
+            start, end = node.txt_range[0]
+            node_ids[str(node.id)] = session.execute(entities.insert().values(
+                run_id=run_id, name=node.name, entity_type_id=node.type,
+                start_index=start, end_index=end, str_match_type="provided",
+                macrostrat_terms_id=node.macrostrat_terms_id,
+            ).returning(entities.c.id)).scalar_one()
+        for edge in payload.edges:
+            session.execute(relationships.insert().values(
+                run_id=run_id, src_entity_id=node_ids[str(edge.source)],
+                dst_entity_id=node_ids[str(edge.dest)],
+                relationship_type_id=edge.relationship_type_id,
+            ))
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(409, "Replacement conflicts with database constraints; original run preserved") from None
+    except Exception:
+        session.rollback()
+        raise
+    return {"success": True, "data": {"table_id": str(run_id), "node_id_mappings": node_ids}}
+
 
 @app.get("/health")
 async def health(
