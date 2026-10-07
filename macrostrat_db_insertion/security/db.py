@@ -1,30 +1,21 @@
-import datetime
+"""Resolve a verified JWT subject to the current role and optional KG account."""
 
-from sqlalchemy import select, update
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from macrostrat_db_insertion.database import get_session_maker, get_engine
-from macrostrat_db_insertion.security.schema import Token
+from macrostrat_db_insertion.security.model import UserAccess
+from macrostrat_db_insertion.security.schema import AuthUser, KGUser
 
 
-def get_access_token(token: str):
-    """The sole database call """
+def get_user_access(sub: str, session: Session) -> UserAccess | None:
+    """Read only. A lookup by sub alone does not authenticate that person."""
+    row = session.execute(
+        select(AuthUser.sub, AuthUser.role, KGUser.internal_user_id)
+        .select_from(AuthUser)
+        .outerjoin(KGUser, KGUser.external_user_id == AuthUser.sub)
+        .where(AuthUser.sub == sub)
+    ).mappings().one_or_none()
 
-    session_maker = get_session_maker()
-    with session_maker() as session:
-
-        select_stmt = select(Token).where(Token.token == token)
-
-        # Check that the token exists
-        result = (session.scalars(select_stmt)).first()
-
-        # Check if it has expired
-        if result.expires_on < datetime.datetime.now(datetime.timezone.utc):
-            return None
-
-        # Update the used_on column
-        if result is not None:
-            stmt = update(Token).where(Token.token == token).values(used_on=datetime.datetime.utcnow())
-            session.execute(stmt)
-            session.commit()
-
-        return (session.scalars(select_stmt)).first()
+    if row is None:
+        return None
+    return UserAccess(**row)

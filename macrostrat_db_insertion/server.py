@@ -18,7 +18,12 @@ import requests
 from macrostrat_db_insertion.settings import Settings
 from macrostrat_db_insertion.log import logging
 from macrostrat_db_insertion.database import connect_engine, dispose_engine, get_base, get_session
-from macrostrat_db_insertion.security import has_access, get_user_id
+from macrostrat_db_insertion.security import (
+    UserAccess,
+    get_user_id,
+    require_admin,
+    require_feedback_user,
+)
 
 
 settings = Settings()
@@ -986,35 +991,24 @@ def process_user_feedback_input_request(request_data, session):
 
     return True, request_additional_data["internal_run_id"]
 
-def require_feedback_user(
-    user_has_access: bool = Depends(has_access),
-    user_id: str | None = Depends(get_user_id),
-):
-    # Identity must come from the verified security dependency, never JSON.
-    if user_id is None or not str(user_id).strip():
-        raise HTTPException(401, "Authentication required")
-    if not user_has_access:
-        raise HTTPException(403, "User does not have access")
-    return str(user_id)
-
-
 # Authentication is required for both model and feedback writes.
 @app.post("/record_run")
 async def record_run(
         request: Request,
-        user_id: str = Depends(require_feedback_user),
+        user: UserAccess = Depends(require_feedback_user),
         session: Session = Depends(get_session)
 ):
 
     # Get the request data
     request_data = await request.json()
-    request_data["user_id"] = str(user_id)
+    request_data["user_id"] = user.sub
 
     # Record the run
     successful, error_msg = False, "Request is not a model or feedback run"
     if "sourceTextId" in request_data: 
         successful, error_msg = process_user_feedback_input_request(request_data, session)
     elif "run_id" in request_data:
+        require_admin(user)
         successful, error_msg = process_model_input_request(request_data, session)
     
     if not successful:
@@ -1074,8 +1068,8 @@ def feedback_table(name):
     return get_base().metadata.tables[get_complete_table_name(name)]
 
 
-def lock_owned_feedback(session, run_id, external_user_id):
-    runs, users = feedback_table("all_runs"), feedback_table("users")
+def lock_owned_feedback(session, run_id, user: UserAccess):
+    runs = feedback_table("all_runs")
     run = session.execute(
         SELECT_STATEMENT(runs).where(runs.c.id == run_id).with_for_update()
     ).mappings().first()
@@ -1083,28 +1077,9 @@ def lock_owned_feedback(session, run_id, external_user_id):
         raise HTTPException(404, "Feedback run not found")
     if run["user_id"] is None or run.get("model_job_id") is not None:
         raise HTTPException(403, "Only user feedback runs can be changed")
-    owner = session.execute(
-        SELECT_STATEMENT(users.c.external_user_id).where(
-            users.c.internal_user_id == run["user_id"]
-        )
-    ).scalar_one_or_none()
-    if owner is None or str(owner) != external_user_id:
-        is_admin = session.execute(
-            text("""
-                SELECT is_admin
-                FROM macrostrat_auth."user"
-                WHERE sub = :user_id
-                FOR SHARE
-            """),
-            {"user_id": external_user_id},
-        ).scalar_one_or_none() is True
+    if not user.can_manage_feedback(run["user_id"]):
+        raise HTTPException(403, "Only the owner or an admin can change this feedback run")
 
-        if not is_admin:
-            raise HTTPException(
-                403,
-                "Only the owner or an admin can change this feedback run",
-            )
-        
     if session.execute(
         SELECT_STATEMENT(runs.c.id).where(runs.c.supersedes == run_id).limit(1)
     ).first() is not None:
@@ -1125,62 +1100,44 @@ def clear_feedback_graph(session, run_id):
     session.execute(delete(relationships).where(relationships.c.run_id == run_id))
     session.execute(delete(entities).where(entities.c.run_id == run_id))
 
-# Return run_ids user has access to, or all run_ids if user is admin.
+# Authorization scope only; referential-integrity checks can still reject writes.
 @app.get("/feedback_runs/access")
 def get_feedback_access(
-    user_id: str = Depends(require_feedback_user),
+    user: UserAccess = Depends(require_feedback_user),
     session: Session = Depends(get_session),
 ):
-    is_admin = session.execute(
-        text("""
-            SELECT COALESCE(role = 'admin', false) AS is_admin
-            FROM macrostrat_auth."user"
-            WHERE sub = :user_id
-        """),
-        {"user_id": user_id},
-    ).scalar_one_or_none() is True
-
-    if is_admin:
-        return {
-            "user_id": user_id,
-            "is_admin": True,
-            "scope": "all_feedback",
-            "run_ids": None,
-        }
+    result = {
+        "user_id": user.sub,
+        "internal_user_id": str(user.internal_user_id) if user.has_kg_account else None,
+        "has_kg_account": user.has_kg_account,
+        "role": user.role,
+        "is_admin": user.is_admin,
+        "scope": "all_feedback" if user.is_admin else "owned_feedback",
+        "run_ids": None if user.is_admin else [],
+    }
+    if user.is_admin or not user.has_kg_account:
+        return result
 
     runs = feedback_table("all_runs")
-    users = feedback_table("users")
-
-    run_ids = session.execute(
+    result["run_ids"] = list(session.execute(
         SELECT_STATEMENT(runs.c.id)
-        .select_from(
-            runs.join(
-                users,
-                users.c.internal_user_id == runs.c.user_id,
-            )
-        )
         .where(
-            users.c.external_user_id == user_id,
+            runs.c.user_id == user.internal_user_id,
             runs.c.model_job_id.is_(None),
         )
         .order_by(runs.c.id)
-    ).scalars().all()
+    ).scalars())
+    return result
 
-    return {
-        "user_id": user_id,
-        "is_admin": False,
-        "scope": "owned_feedback",
-        "run_ids": list(run_ids),
-    }
 
 @app.delete("/feedback_runs/{run_id}")
 def delete_feedback_run(
     run_id: int,
-    user_id: str = Depends(require_feedback_user),
+    user: UserAccess = Depends(require_feedback_user),
     session: Session = Depends(get_session),
 ):
     try:
-        lock_owned_feedback(session, run_id, user_id)
+        lock_owned_feedback(session, run_id, user)
         clear_feedback_graph(session, run_id)
         runs = feedback_table("all_runs")
         session.execute(delete(runs).where(runs.c.id == run_id))
@@ -1198,11 +1155,11 @@ def delete_feedback_run(
 def overwrite_feedback_run(
     run_id: int,
     payload: FeedbackReplacement,
-    user_id: str = Depends(require_feedback_user),
+    user: UserAccess = Depends(require_feedback_user),
     session: Session = Depends(get_session),
 ):
     try:
-        run = lock_owned_feedback(session, run_id, user_id)
+        run = lock_owned_feedback(session, run_id, user)
         sources = feedback_table("source_text")
         paragraph = session.execute(SELECT_STATEMENT(sources.c.paragraph_text).where(
             sources.c.id == run["source_text_id"]
