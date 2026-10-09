@@ -398,7 +398,7 @@ def get_entity_id(entity_name, entity_type, request_additional_data, session: Se
         entity_insert_request_values["entity_type_id"] = entity_type_id
 
     entity_start_idx, entity_end_idx, str_match_type = provided_start_idx, provided_end_idx, "provided"
-    
+
     # Add global entity ID if provided by the client
     if macrostrat_terms_id is not None:
         entity_insert_request_values["macrostrat_terms_id"] = macrostrat_terms_id
@@ -495,7 +495,7 @@ def record_single_entity(entity, request_additional_data, session: Session):
     entity_required_fields = verify_key_presents(entity, ["entity"])
     if entity_required_fields is not None:
         return False, entity_required_fields
-    
+
     # Get the entity type
     entity_type = None
     if "entity_type" in entity:
@@ -552,7 +552,7 @@ def insert_relationship(src_entity_id, dst_entity_id, relationship_type, request
         success, relationship_type_id = get_relationship_type_id(relationship_type, session)
         if not success:
             return success, relationship_type_id
-    
+
     # Get the values to write
     relationship_insert_values = {
         "run_id" : request_additional_data["internal_run_id"],
@@ -873,7 +873,7 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
     run_verify_result = verify_key_presents(node_info, ["id", "type", "name"])
     if run_verify_result is not None:
         return False, run_verify_result
-    
+
     # Determine the entity details
     old_node_id = node_info["id"]
     entity_name = node_info["name"]
@@ -883,7 +883,7 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
         if len(txt_range_details) > 0:
             first_range = txt_range_details[0]
             start_idx, end_idx = first_range[0], first_range[1]
-    
+
     # Record if the user provided the id for an entity type
     curr_entity_type_id = node_info["type"]
     curr_entity_type_name = node_info.get("type_name")
@@ -891,7 +891,7 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
     success, entity_type_name = get_entity_type_text(curr_entity_type_id, session, type_name=curr_entity_type_name, user_id="user_id") # TODO: Replace "user_id" with actual user id if available
     if not success:
         return success, entity_type_name
-    
+
     macrostrat_terms_id = (
         node_info.get("macrostrat_terms_id")
         or (node_info.get("match") or {}).get("macrostrat_terms_id")
@@ -911,7 +911,7 @@ def record_user_relationship_info(curr_edge, request_additional_data, session : 
     run_verify_result = verify_key_presents(curr_edge, ["source", "dest"])
     if run_verify_result is not None:
         return False, run_verify_result
-    
+
     # Get the new node ids
     node_mappings = request_additional_data["node_id_mappings"]
     old_source_id = curr_edge["source"]
@@ -932,12 +932,12 @@ def process_user_feedback_input_request(request_data, session):
     run_verify_result = verify_key_presents(request_data, ["sourceTextId", "supersedesRunIds", "user_id"])
     if run_verify_result is not None:
         return False, run_verify_result
-    
+
     # Get the internal user id
     success, user_id = get_internal_user_id(request_data["user_id"], session)
     if not success:
         return success, user_id
-    
+
     # Then get the previous run for this result
     source_text_id = request_data["sourceTextId"]
     success, previous_run_id = get_previous_run(source_text_id, session)
@@ -982,7 +982,7 @@ def process_user_feedback_input_request(request_data, session):
             success, err_msg = record_user_node_info(curr_node, request_additional_data, session)
             if not success:
                 return success, err_msg
-    
+
     if "edges" in request_data:
         for curr_edge in request_data["edges"]:
             success, err_msg = record_user_relationship_info(curr_edge, request_additional_data, session)
@@ -1010,7 +1010,7 @@ async def record_run(
     elif "run_id" in request_data:
         require_admin(user)
         successful, error_msg = process_model_input_request(request_data, session)
-    
+
     if not successful:
         print("Returning error message", error_msg)
         raise HTTPException(status_code=400, detail=error_msg)
@@ -1027,20 +1027,34 @@ async def record_run(
 
 
 class FeedbackNode(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # The editor includes presentation fields such as color and children.
+    # Persist only declared fields, as the save endpoint does.
+    model_config = ConfigDict(extra="ignore")
     id: StrictInt | StrictStr
     type: StrictInt
+    type_name: str | None = None
     name: str = Field(min_length=1)
     txt_range: list[tuple[StrictInt, StrictInt]] = Field(min_length=1, max_length=1)
     macrostrat_terms_id: StrictInt | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_match(cls, value):
+        if isinstance(value, dict):
+            value = dict(value)
+            match = value.get("match")
+            if value.get("macrostrat_terms_id") is None and isinstance(match, dict):
+                value["macrostrat_terms_id"] = match.get("macrostrat_terms_id")
+        return value
+
 
 class FeedbackEdge(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     id: StrictInt | StrictStr | None = None
     source: StrictInt | StrictStr
     dest: StrictInt | StrictStr
-    relationship_type_id: StrictInt
+    # Save-style edges omit this; infer it from the endpoint entity types.
+    relationship_type_id: StrictInt | None = None
 
 
 class FeedbackReplacement(BaseModel):
@@ -1048,6 +1062,9 @@ class FeedbackReplacement(BaseModel):
     model_config = ConfigDict(extra="forbid")
     nodes: list[FeedbackNode]
     edges: list[FeedbackEdge]
+    # Accept the save envelope without changing the existing run's metadata.
+    sourceTextId: StrictInt | StrictStr | None = None
+    supersedesRunIds: list[StrictInt | StrictStr] | None = None
 
     @model_validator(mode="after")
     def validate_graph(self):
@@ -1160,27 +1177,72 @@ def overwrite_feedback_run(
 ):
     try:
         run = lock_owned_feedback(session, run_id, user)
+        if payload.sourceTextId is not None and str(payload.sourceTextId) != str(run["source_text_id"]):
+            raise HTTPException(422, "sourceTextId must match the existing run")
         sources = feedback_table("source_text")
         paragraph = session.execute(SELECT_STATEMENT(sources.c.paragraph_text).where(
             sources.c.id == run["source_text_id"]
         )).scalar_one()
         entity_types = feedback_table("entity_type")
         relationship_types = feedback_table("relationship_type")
-        valid_types = set(session.execute(SELECT_STATEMENT(entity_types.c.id).where(
+        type_names = dict(session.execute(SELECT_STATEMENT(entity_types.c.id, entity_types.c.name).where(
             entity_types.c.id.in_({n.type for n in payload.nodes})
-        )).scalars())
+        )).all())
+        explicit_relationship_ids = {
+            e.relationship_type_id for e in payload.edges
+            if e.relationship_type_id is not None
+        }
         valid_relationships = set(session.execute(SELECT_STATEMENT(relationship_types.c.id).where(
-            relationship_types.c.id.in_({e.relationship_type_id for e in payload.edges})
+            relationship_types.c.id.in_(explicit_relationship_ids)
         )).scalars())
         for node in payload.nodes:
             start, end = node.txt_range[0]
-            if node.type not in valid_types:
-                raise HTTPException(422, f"Unknown entity type: {node.type}")
             if not (0 <= start < end <= len(paragraph)) or paragraph[start:end] != node.name:
                 raise HTTPException(422, f"Node {node.id}: range must exactly match its name")
+            if node.type not in type_names:
+                if not node.type_name or not node.type_name.strip():
+                    raise HTTPException(422, f"Unknown entity type: {node.type}; provide type_name")
+                # Match save's custom-type support, within this transaction.
+                session.execute(INSERT_STATEMENT(entity_types).values(
+                    id=node.type, name=node.type_name, source=str(user.sub),
+                ).on_conflict_do_nothing(index_elements=["id"]))
+                type_names[node.type] = session.execute(
+                    SELECT_STATEMENT(entity_types.c.name).where(entity_types.c.id == node.type)
+                ).scalar_one()
+
+        nodes_by_id = {str(node.id): node for node in payload.nodes}
+        inferred_types = {}
+        resolved_edges = []
+        seen_edges = set()
         for edge in payload.edges:
-            if edge.relationship_type_id not in valid_relationships:
-                raise HTTPException(422, f"Unknown relationship type: {edge.relationship_type_id}")
+            relationship_type_id = edge.relationship_type_id
+            if relationship_type_id is not None:
+                if relationship_type_id not in valid_relationships:
+                    raise HTTPException(422, f"Unknown relationship type: {relationship_type_id}")
+            else:
+                source_type = type_names[nodes_by_id[str(edge.source)].type]
+                dest_type = type_names[nodes_by_id[str(edge.dest)].type]
+                relationship_name = f"{source_type}_to_{dest_type}"
+                if relationship_name not in inferred_types:
+                    stmt = SELECT_STATEMENT(relationship_types.c.id).where(
+                        relationship_types.c.name == relationship_name
+                    )
+                    relationship_type_id = session.execute(stmt).scalar_one_or_none()
+                    if relationship_type_id is None:
+                        # Do not call the legacy helper: it commits internally.
+                        session.execute(INSERT_STATEMENT(relationship_types).values(
+                            name=relationship_name,
+                        ).on_conflict_do_nothing(index_elements=["name"]))
+                        relationship_type_id = session.execute(stmt).scalar_one()
+                    inferred_types[relationship_name] = relationship_type_id
+                relationship_type_id = inferred_types[relationship_name]
+
+            # Explicit and inferred IDs can resolve to the same relationship.
+            key = (str(edge.source), str(edge.dest), relationship_type_id)
+            if key in seen_edges:
+                raise HTTPException(422, "Duplicate relationships")
+            seen_edges.add(key)
+            resolved_edges.append((edge, relationship_type_id))
 
         # Use Core inserts directly: the legacy helpers commit after each insert.
         # One transaction covers deletion and all replacement inserts.
@@ -1194,11 +1256,11 @@ def overwrite_feedback_run(
                 start_index=start, end_index=end, str_match_type="provided",
                 macrostrat_terms_id=node.macrostrat_terms_id,
             ).returning(entities.c.id)).scalar_one()
-        for edge in payload.edges:
+        for edge, relationship_type_id in resolved_edges:
             session.execute(relationships.insert().values(
                 run_id=run_id, src_entity_id=node_ids[str(edge.source)],
                 dst_entity_id=node_ids[str(edge.dest)],
-                relationship_type_id=edge.relationship_type_id,
+                relationship_type_id=relationship_type_id,
             ))
         session.commit()
     except IntegrityError:
