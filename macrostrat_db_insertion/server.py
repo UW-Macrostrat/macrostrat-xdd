@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from uuid import UUID
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ import requests
 from macrostrat_db_insertion.settings import Settings
 from macrostrat_db_insertion.log import logging
 from macrostrat_db_insertion.database import connect_engine, dispose_engine, get_base, get_session
+from macrostrat_db_insertion.relationship_types import ensure_relationship_type
 from macrostrat_db_insertion.security import (
     UserAccess,
     get_user_id,
@@ -509,7 +511,9 @@ def record_single_entity(entity, request_additional_data, session: Session):
 
     return get_entity_id(entity["entity"], entity_type, request_additional_data, session, provided_start_idx, provided_end_idx, macrostrat_terms_id=entity.get("macrostrat_terms_id"))
 
-def get_relationship_type_id(relationship_type, session: Session):
+def get_relationship_type_id(
+    relationship_type, session: Session, *, src_entity_id=None, dst_entity_id=None, user_id=None
+):
     relationship_type_table_name = get_complete_table_name("relationship_type")
     relationship_type_table = get_base().metadata.tables[relationship_type_table_name]
 
@@ -524,32 +528,36 @@ def get_relationship_type_id(relationship_type, session: Session):
             first_row = relationship_type_result[0]._mapping
             return True, first_row["id"]
     except:
-        return False, "Failed to find entity type " + relationship_type + " in table " + relationship_type_table_name + " due to error: " + traceback.format_exc()
+        return False, "Failed to find relationship type " + relationship_type + " in table " + relationship_type_table_name + " due to error: " + traceback.format_exc()
 
     # If not try to insert the relationship type into the table
     try:
-        relationship_type_insert_values = {
-            "name" : relationship_type,
-        }
-        relationship_type_insert_statement = INSERT_STATEMENT(relationship_type_table).values(**relationship_type_insert_values)
-        relationship_type_insert_statement = relationship_type_insert_statement.on_conflict_do_nothing(index_elements = list(relationship_type_insert_values.keys()))
-        result = session.execute(relationship_type_insert_statement)
+        # Use the saved entities' types, not a guess based on the relation name.
+        entities = get_base().metadata.tables[get_complete_table_name("entity")]
+        endpoint_types = dict(session.execute(
+            SELECT_STATEMENT(entities.c.id, entities.c.entity_type_id).where(
+                entities.c.id.in_([src_entity_id, dst_entity_id])
+            )
+        ).all())
+        relationship_type_id = ensure_relationship_type(
+            session, relationship_type_table, relationship_type,
+            endpoint_types.get(src_entity_id), endpoint_types.get(dst_entity_id),
+            user_id=user_id,
+        )
         session.commit()
-
-        # Get the internal id
-        result_insert_keys = result.inserted_primary_key
-        if len(result_insert_keys) == 0:
-            return False, "Insert statement " + str(relationship_type_insert_statement) + " returned zero primary keys"
-
-        return True, result_insert_keys[0]
+        return True, relationship_type_id
     except:
-        return False, "Failed to insert entity type " + relationship_type + " into table " + relationship_type_table_name + " due to error: " + traceback.format_exc()
+        return False, "Failed to insert relationship type " + relationship_type + " into table " + relationship_type_table_name + " due to error: " + traceback.format_exc()
 
 def insert_relationship(src_entity_id, dst_entity_id, relationship_type, request_additional_data, session: Session):
     # Record the relationship type id
     relationship_type_id = None
     if relationship_type is not None:
-        success, relationship_type_id = get_relationship_type_id(relationship_type, session)
+        success, relationship_type_id = get_relationship_type_id(
+            relationship_type, session,
+            src_entity_id=src_entity_id, dst_entity_id=dst_entity_id,
+            user_id=request_additional_data.get("user_id"),
+        )
         if not success:
             return success, relationship_type_id
 
@@ -832,7 +840,7 @@ def get_entity_type_text(
     entity_type_id: int,
     session: Session,
     type_name: str | None = None,
-    user_id: str | None = None,
+    user_id: UUID | None = None,
 ):
     entity_type_table_name = get_complete_table_name("entity_type")
     entity_type_table = get_base().metadata.tables[entity_type_table_name]
@@ -852,7 +860,7 @@ def get_entity_type_text(
         insert_stmt = entity_type_table.insert().values(
             id=entity_type_id,
             name=type_name,
-            source=str(user_id) if user_id is not None else "user",
+            user_id=user_id,
         )
         session.execute(insert_stmt)
         session.commit()
@@ -888,7 +896,11 @@ def record_user_node_info(node_info, request_additional_data, session : Session)
     curr_entity_type_id = node_info["type"]
     curr_entity_type_name = node_info.get("type_name")
     request_additional_data.pop("curr_entity_type_id", None)
-    success, entity_type_name = get_entity_type_text(curr_entity_type_id, session, type_name=curr_entity_type_name, user_id="user_id") # TODO: Replace "user_id" with actual user id if available
+    success, entity_type_name = get_entity_type_text(
+        curr_entity_type_id, session,
+        type_name=curr_entity_type_name,
+        user_id=request_additional_data.get("user_id"),
+    )
     if not success:
         return success, entity_type_name
 
@@ -976,6 +988,7 @@ def process_user_feedback_input_request(request_data, session):
         return False, "Failed to insert feedback for document " + str(source_text_id) + " from user " + str(user_id) + " due to error: " + traceback.format_exc()
 
     # Record the nodes we have
+    request_additional_data["user_id"] = user_id
     request_additional_data["node_id_mappings"] = {}
     if "nodes" in request_data:
         for curr_node in request_data["nodes"]:
@@ -1195,6 +1208,16 @@ def overwrite_feedback_run(
         valid_relationships = set(session.execute(SELECT_STATEMENT(relationship_types.c.id).where(
             relationship_types.c.id.in_(explicit_relationship_ids)
         )).scalars())
+        creator_user_id = user.internal_user_id
+        if creator_user_id is None:
+            users = feedback_table("users")
+            session.execute(INSERT_STATEMENT(users).values(
+                external_user_id=user.sub,
+            ).on_conflict_do_nothing(index_elements=["external_user_id"]))
+            creator_user_id = session.execute(SELECT_STATEMENT(users.c.internal_user_id).where(
+                users.c.external_user_id == user.sub
+            )).scalar_one()
+
         for node in payload.nodes:
             start, end = node.txt_range[0]
             if not (0 <= start < end <= len(paragraph)) or paragraph[start:end] != node.name:
@@ -1204,7 +1227,7 @@ def overwrite_feedback_run(
                     raise HTTPException(422, f"Unknown entity type: {node.type}; provide type_name")
                 # Match save's custom-type support, within this transaction.
                 session.execute(INSERT_STATEMENT(entity_types).values(
-                    id=node.type, name=node.type_name, source=str(user.sub),
+                    id=node.type, name=node.type_name, user_id=creator_user_id,
                 ).on_conflict_do_nothing(index_elements=["id"]))
                 type_names[node.type] = session.execute(
                     SELECT_STATEMENT(entity_types.c.name).where(entity_types.c.id == node.type)
@@ -1224,16 +1247,12 @@ def overwrite_feedback_run(
                 dest_type = type_names[nodes_by_id[str(edge.dest)].type]
                 relationship_name = f"{source_type}_to_{dest_type}"
                 if relationship_name not in inferred_types:
-                    stmt = SELECT_STATEMENT(relationship_types.c.id).where(
-                        relationship_types.c.name == relationship_name
+                    relationship_type_id = ensure_relationship_type(
+                        session, relationship_types, relationship_name,
+                        nodes_by_id[str(edge.source)].type,
+                        nodes_by_id[str(edge.dest)].type,
+                        user_id=creator_user_id,
                     )
-                    relationship_type_id = session.execute(stmt).scalar_one_or_none()
-                    if relationship_type_id is None:
-                        # Do not call the legacy helper: it commits internally.
-                        session.execute(INSERT_STATEMENT(relationship_types).values(
-                            name=relationship_name,
-                        ).on_conflict_do_nothing(index_elements=["name"]))
-                        relationship_type_id = session.execute(stmt).scalar_one()
                     inferred_types[relationship_name] = relationship_type_id
                 relationship_type_id = inferred_types[relationship_name]
 
@@ -1305,6 +1324,17 @@ async def health(
         "Logged In `user_id`": user_id
     })
 
+
+@app.get("/relationship_types")
+def list_relationship_types(
+    user: UserAccess = Depends(require_feedback_user),
+    session: Session = Depends(get_session),
+):
+    """Return type metadata including the creator's internal database user ID."""
+    table = feedback_table("relationship_type")
+    return [dict(row) for row in session.execute(
+        SELECT_STATEMENT(table).order_by(table.c.id)
+    ).mappings()]
 
 if __name__ == "__main__":
     import uvicorn
